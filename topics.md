@@ -3,7 +3,7 @@
 Posts are written top-down. Add, remove or reorder freely.
 
 ## LLMs, RAG and agents
-- [ ] Build a RAG pipeline from scratch in ~100 lines of Python (local embeddings, no API key)
+- [x] Build a RAG pipeline from scratch in ~100 lines of Python (local embeddings, no API key) -> rag-from-scratch-in-100-lines
 - [ ] Make an LLM cite its sources or say "I don't know": grounded answers with a retrieval-miss fallback
 - [ ] Chunking strategies for RAG compared on the same documents: fixed, recursive, by heading
 - [ ] Write a tool-calling agent loop from scratch that actually stops

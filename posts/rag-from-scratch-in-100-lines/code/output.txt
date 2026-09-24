@@ -1,0 +1,27 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|##########| 103/103 [00:00<00:00, 3452.27it/s]
+Indexed 15 chunks from 4 files
+
+Loading weights:   0%|          | 0/190 [00:00<?, ?it/s]Loading weights:  14%|#3        | 26/190 [00:00<00:00, 252.89it/s]Loading weights:  27%|##7       | 52/190 [00:00<00:00, 174.78it/s]Loading weights: 100%|##########| 190/190 [00:00<00:00, 648.90it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+Q: How do I roll back a bad deploy?
+A: run: quokka rollback --env prod
+   [rollbacks.md #1] 0.468
+   [rollbacks.md #0] 0.452
+   [rollbacks.md #2] 0.443
+
+Q: What port does the local dev server listen on?
+A: **port 7717**
+   [getting-started.md #2] 0.294
+   [getting-started.md #1] 0.214
+   [troubleshooting.md #1] 0.176
+
+Q: My deploy failed with E_LOCKED. What should I do?
+A: i don't know
+   [troubleshooting.md #0] 0.614
+   [deploying.md #2] 0.419
+   [deploying.md #0] 0.273
+
+Q: What is the capital of France?
+A: I don't know - nothing in the docs is close enough.
+

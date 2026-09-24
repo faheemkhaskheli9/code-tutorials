@@ -1,0 +1,175 @@
+<p>Every RAG tutorial I open starts with <code>pip install langchain chromadb openai</code> and ends with a chatbot I can't debug. Four hundred megabytes of dependencies, three abstraction layers, and when the answers come back wrong I have no idea which layer lied to me.</p>
+
+<p>So here's the opposite. One file, about 100 lines, four dependencies you probably already have, and no API key. It chunks a folder of Markdown, embeds it with a small local model, retrieves by cosine similarity, and has a language model answer <i>only</i> from what it retrieved - or say "I don't know" when retrieval comes up empty. Every piece is small enough to read in one sitting, which means when it misbehaves you can actually find out why.</p>
+
+<p>It runs on a laptop CPU. The first run downloads about 400 MB of model weights and takes roughly four minutes; after that the whole script finishes in 15 seconds.</p>
+
+<p><b>Full code:</b> <a href="{{CODE_URL}}">browse on GitHub</a> | <a href="{{ZIP_URL}}">download ZIP</a></p>
+
+<h2>The corpus is fake, and that's the point</h2>
+
+<p>The <code>docs/</code> folder holds four pages of documentation for a deployment CLI called Quokka. Quokka doesn't exist. I made it up - the port numbers, the error codes, the rollback semantics, all of it.</p>
+
+<p>That's deliberate. If I point a RAG demo at the Python docs, a language model can answer most questions from memory and I learn nothing about whether my retrieval works. With an invented tool, a correct answer <i>has</i> to have come through the pipeline. When the model tells me the dev server runs on port 7717, that number could only have arrived one way.</p>
+
+<p>If you're building RAG over real internal docs, steal this trick for your test set. Invent a page. If the system answers questions about it, retrieval is doing its job.</p>
+
+<h2>Chunking: the boring part that decides everything</h2>
+
+<p>Embedding a whole document into one vector is useless - you get the average meaning of 2,000 words, which is nobody's question. So documents get split. This is where most RAG quality is won or lost, and it's the part people skip past to get to the model.</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python">def chunk(text, size=CHUNK_CHARS, overlap=OVERLAP_CHARS):
+    """Split into overlapping pieces, cutting at whitespace, always moving forward."""
+    pieces, start = [], 0
+    while start &lt; len(text):
+        end = min(start + size, len(text))
+        if end &lt; len(text):
+            snap = text.rfind(" ", start, end)
+            if snap &gt; start:
+                end = snap
+        if text[start:end].strip():
+            pieces.append(text[start:end].strip())
+        if end &gt;= len(text):
+            break
+        start = max(end - overlap, start + 1)
+    return pieces</code></pre>
+
+<p>Three decisions in there worth defending.</p>
+
+<p><b>600 characters with 100 of overlap.</b> Small enough that a chunk is about one idea, big enough to carry the sentence that gives it context. The overlap exists so a fact that straddles a boundary survives in at least one chunk intact.</p>
+
+<p><b>Snap to whitespace.</b> Cutting at a fixed offset splits words in half, which corrupts the tokens you're about to embed for no benefit at all. <code>rfind(" ", start, end)</code> walks back to the last space in the window. Two lines, better vectors.</p>
+
+<p><b>That <code>max(end - overlap, start + 1)</code> guards a real bug.</b> If overlap ever approaches chunk size, or the whitespace snap pulls <code>end</code> back near <code>start</code>, then <code>start = end - overlap</code> can move <i>backwards</i> and the loop spins forever emitting the same chunk. I'd rather have one <code>max()</code> than a hang in production. This is the kind of thing a framework hides from you until the day it doesn't.</p>
+
+<h2>Embeddings without sentence-transformers</h2>
+
+<p><code>sentence-transformers</code> is a fine library, but it's another dependency wrapping something that's twelve lines of <code>transformers</code>. MiniLM gives you one vector per token; you need one per chunk. The standard move is a mean over the tokens, and the only subtlety is ignoring the padding.</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python">class Embedder:
+    """MiniLM + mean pooling + L2 normalisation, so cosine similarity is a dot product."""
+
+    def __init__(self, name=EMBED_MODEL):
+        self.tok = AutoTokenizer.from_pretrained(name)
+        self.model = AutoModel.from_pretrained(name).eval()
+
+    def __call__(self, texts):
+        batch = self.tok(texts, padding=True, truncation=True, max_length=256, return_tensors="pt")
+        with torch.no_grad():
+            hidden = self.model(**batch).last_hidden_state
+        mask = batch["attention_mask"].unsqueeze(-1).float()
+        pooled = (hidden * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+        return torch.nn.functional.normalize(pooled, dim=1).numpy()</code></pre>
+
+<p>The <code>attention_mask</code> multiply is the line that matters. Without it you average real tokens together with padding tokens, and short chunks get dragged toward whatever <code>[PAD]</code> happens to embed as. Longer chunks then look artificially different from short ones, and your ranking quietly degrades in a way that's very hard to notice.</p>
+
+<p>Normalising to unit length is a convenience with teeth: once every vector has length 1, cosine similarity <i>is</i> the dot product, so the search step becomes a matrix multiply instead of a loop with divisions in it.</p>
+
+<h2>The vector database is a NumPy array</h2>
+
+<p>Fifteen chunks. Three hundred and eighty-four dimensions. That's a 15×384 float array - about 23 kilobytes. Installing Chroma or Pinecone to hold 23 kilobytes is not engineering, it's shopping.</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python">def build_index(embed, docs=DOCS):
+    if not docs.is_dir():
+        raise SystemExit(f"No docs directory at {docs}")
+    chunks, sources = [], []
+    for path in sorted(docs.glob("*.md")):
+        for i, piece in enumerate(chunk(path.read_text(encoding="utf-8"))):
+            chunks.append(piece)
+            sources.append((path.name, i))
+    return {"vectors": embed(chunks), "chunks": chunks, "sources": sources}
+
+
+def search(question, index, embed, top_k=TOP_K):
+    scores = index["vectors"] @ embed([question])[0]
+    order = np.argsort(-scores)[:top_k]
+    return [(float(scores[i]), index["chunks"][i], index["sources"][i]) for i in order]</code></pre>
+
+<p>Search is two lines: one matrix multiply, one sort. A real vector database earns its place when you have millions of vectors and need approximate nearest neighbours, or when several processes share an index. At 15 chunks, or 15,000, exact brute-force search is faster than the network hop to the service that would do it approximately.</p>
+
+<p>Note that <code>sources</code> carries the filename and chunk position alongside every vector. Retrieval without provenance is just a language model with extra steps - if you can't show the user where an answer came from, you can't let them check it.</p>
+
+<h2>Grounding: the part people get wrong</h2>
+
+<p>Here's the bit that separates RAG from a party trick. A language model handed retrieved text will happily answer even when the retrieval was garbage. The fix is two guards, not one.</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python">PROMPT = (
+    "Answer the question using only the context below. If the context does not "
+    "contain the answer, reply exactly: I don't know.\n\n"
+    "Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+)
+
+
+def answer(question, index, embed, generate):
+    hits = search(question, index, embed)
+    if not hits or hits[0][0] &lt; MIN_SCORE:
+        return "I don't know - nothing in the docs is close enough.", []
+    context = "\n\n".join(text for _, text, _ in hits)
+    return generate(PROMPT.format(context=context, question=question)), hits</code></pre>
+
+<p>The prompt instruction is the soft guard. <code>MIN_SCORE</code> is the hard one: if the best chunk scores below 0.25, the model never gets called at all. No context, no prompt, no opportunity to improvise. That threshold is the cheapest hallucination defence in the whole pipeline and it costs one <code>if</code>.</p>
+
+<p>The generator is passed in as a function, which is the one bit of indirection I'll defend. It buys the swap to a hosted model for free:</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python">def hosted_generate(prompt):
+    """Where a hosted model plugs in - same prompt, better answers. `pip install anthropic`."""
+    import anthropic  # deliberately not in requirements.txt: the local path needs no key
+
+    msg = anthropic.Anthropic().messages.create(
+        model="claude-opus-5", max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return next(b.text for b in msg.content if b.type == "text").strip()</code></pre>
+
+<p>Same retrieval, same prompt, different last mile - <code>python main.py --hosted "..."</code>. That path needs an API key, so it is not what produced the output below; everything you're about to see ran locally on CPU.</p>
+
+<h2>Running it</h2>
+
+<p>Real output from <code>output.txt</code>, with the Hugging Face download bars stripped out:</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code>Indexed 15 chunks from 4 files
+
+Q: How do I roll back a bad deploy?
+A: run: quokka rollback --env prod
+   [rollbacks.md #1] 0.468
+   [rollbacks.md #0] 0.452
+   [rollbacks.md #2] 0.443
+
+Q: What port does the local dev server listen on?
+A: **port 7717**
+   [getting-started.md #2] 0.294
+   [getting-started.md #1] 0.214
+   [troubleshooting.md #1] 0.176
+
+Q: My deploy failed with E_LOCKED. What should I do?
+A: i don't know
+   [troubleshooting.md #0] 0.614
+   [deploying.md #2] 0.419
+   [deploying.md #0] 0.273
+
+Q: What is the capital of France?
+A: I don't know - nothing in the docs is close enough.</code></pre>
+
+<p>Two clean hits, one refusal that's supposed to happen, and one failure that taught me more than the successes.</p>
+
+<h2>Gotchas</h2>
+
+<p><b>The third question is a generator failure, not a retrieval failure.</b> Look at the score: 0.614 on <code>troubleshooting.md #0</code>, the single highest score in the whole run, and that chunk opens with the exact answer ("Another deploy holds the lock... wait for it to finish"). Retrieval was perfect. Flan-T5-small, at 77 million parameters, read it and said "i don't know" anyway. Small models take the escape hatch you give them, especially on open-ended phrasings like "what should I do?" - that's what <code>--hosted</code> is for, and it's exactly why I keep the score next to every answer. Without the scores I'd have spent an hour tuning chunk size to fix a problem that was never in the retriever.</p>
+
+<p><b>The correct answer scored 0.294 against a 0.25 cutoff.</b> The port question worked, but by 0.044. Absolute cosine scores from MiniLM are not intuitive: correct matches routinely land in the 0.3s, not the 0.8s you might expect. Tune <code>MIN_SCORE</code> against questions you know the answers to, and check what your <i>off-topic</i> questions score before you raise it. I picked 0.25 by running the France question and seeing where it landed.</p>
+
+<p><b>The Markdown leaked.</b> The answer came back as <code>**port 7717**</code> because the source document had it in bold. The model is extracting verbatim, asterisks and all. Charming in a terminal, not something you want in a web UI - strip Markdown at ingestion or at display, but decide which.</p>
+
+<p><b>Numbering the context chunks made things worse.</b> My first version labelled each retrieved chunk <code>[1]</code>, <code>[2]</code>, <code>[3]</code> so the model could cite them. Flan-T5-small's answer to the E_LOCKED question was, in full: <code>[3]</code>. It learned to output a citation marker instead of an answer. Small instruction-tuned models copy the most distinctive pattern in the prompt. Citations now come from the retrieval metadata, printed by the code - which is more trustworthy anyway, since a model can't fake a citation it was never asked to produce.</p>
+
+<h2>Where to go next</h2>
+
+<p><b>Persist the index.</b> Right now every run re-embeds all 15 chunks. Save the array with <code>np.save</code> and give each chunk an id that's a hash of <code>(filename, position, chunk text)</code> - hashing the text too, not just the position, means an edited chunk gets a new id instead of silently overwriting the old one under a stale key. That one choice is what makes re-ingestion safe to run on a cron.</p>
+
+<p><b>Add keyword search alongside the vectors.</b> Embeddings are bad at exact strings - <code>E_LOCKED</code> and <code>E_NO_PROD_FROM_DEV</code> look nearly identical to MiniLM. A BM25 score merged with the cosine score fixes error codes, version numbers and function names, and it's about 30 more lines.</p>
+
+<p><b>Build a tiny eval set.</b> Twenty questions with the filename you expect back, then measure how often the right chunk is in the top 3. It turns "the chunking feels better now" into a number, and it's the only way to know whether a change helped.</p>
+
+<p><b>Full code:</b> <a href="{{CODE_URL}}">browse on GitHub</a> | <a href="{{ZIP_URL}}">download ZIP</a></p>
+
+<p>The thing I keep going back and forth on is <code>MIN_SCORE</code>. A fixed threshold works on this corpus, but it's clearly a knob that wants tuning per document set, and I've seen suggestions to use the gap between the top two scores instead. What are you using to decide that retrieval missed?</p>
