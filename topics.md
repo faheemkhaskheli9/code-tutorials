@@ -4,7 +4,7 @@ Posts are written top-down. Add, remove or reorder freely.
 
 ## LLMs, RAG and agents
 - [x] Build a RAG pipeline from scratch in ~100 lines of Python (local embeddings, no API key) -> rag-from-scratch-in-100-lines
-- [ ] Make an LLM cite its sources or say "I don't know": grounded answers with a retrieval-miss fallback
+- [x] Make an LLM cite its sources or say "I don't know": grounded answers with a retrieval-miss fallback -> grounded-answers-cite-or-abstain
 - [ ] Chunking strategies for RAG compared on the same documents: fixed, recursive, by heading
 - [ ] Write a tool-calling agent loop from scratch that actually stops
 - [ ] Text-to-SQL with a small local model and a SQLite guard against destructive queries

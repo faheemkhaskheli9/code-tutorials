@@ -1,0 +1,146 @@
+<p>A RAG chatbot that cites its sources feels trustworthy. That's the problem. The citation is usually just text the model typed, and a model that will invent an answer will happily invent the <code>[2]</code> after it.</p>
+
+<p>I hit this the moment I asked a small local model to cite. Told to answer "using only the numbered context" and to "cite the number you used, like [1]", flan-t5-small answered the question <i>What does error E_SD mean?</i> with the complete text <code>[1]</code>. No answer. Just the citation. That's the extreme version of a failure you get in subtler forms from every model: the marker and the sentence have nothing to do with each other.</p>
+
+<p>So this post builds the opposite arrangement. The model never gets asked for a citation. Instead, three gates sit between it and the user: one that refuses to call the model at all when retrieval misses, one that checks every sentence of the answer against the retrieved chunks, and one that checks every number. The citation is then computed - it names the chunk that actually backs that sentence. On an 11-question set, the gates took this pipeline from 5/11 correct to 8/11, and from 1 correct refusal out of 5 to 5 out of 5.</p>
+
+<p>It runs on a CPU laptop - 13 seconds for a warm run on mine - with no API key.</p>
+
+<p><b>Full code:</b> <a href="{{CODE_URL}}">browse on GitHub</a> | <a href="{{ZIP_URL}}">download ZIP</a></p>
+
+<h2>The corpus, and why it's fake</h2>
+
+<p><code>docs/</code> is the manual for a weather station called the Quill 2, which does not exist. I invented the sampling interval, the error codes and the radio range. If I pointed this at real documentation, the model could answer from memory and I'd learn nothing about whether my retrieval and my gates work.</p>
+
+<p>More importantly, the manual is deliberately <i>incomplete</i>. It never says how long the battery lasts, never mentions wind speed, never mentions a warranty. Those gaps are the test. Anyone can build a system that answers questions; the hard part is a system that knows when to stop.</p>
+
+<h2>Gate 1: don't call the model on a retrieval miss</h2>
+
+<p>Retrieval is the usual thing - paragraph-sized chunks, MiniLM embeddings, cosine similarity, top 3. The gate is the first branch after it:</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python">def answer(question, index, embed, generate, gates=True):
+    """Return (text, hits, rejected). hits is [] when the retrieval gate fires."""
+    hits = search(question, index, embed)
+    if hits[0][1] &lt; RETRIEVAL_MIN:
+        return f"{ABSTAIN} The manual does not cover this.", [], [
+            f"retrieval gate: best chunk scored {hits[0][1]:.2f} &lt; {RETRIEVAL_MIN}"
+        ]</code></pre>
+
+<p>The alternative is to pass empty or weak context to the model with an instruction to decline. I'd skip that. A model prompted with nothing relevant is exactly the model most likely to fill the silence, and you've made your safety property depend on a sampling decision. Returning a fixed string is deterministic, testable, and free.</p>
+
+<p>"What is the capital of France?" scores 0.10 against this manual and never reaches the model. That's the cheapest gate in the file and it catches the most embarrassing failures.</p>
+
+<h2>The prompt does not ask for citations</h2>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python"># No "cite your sources" instruction on purpose: flan-t5-small answers a
+# question like "What does E_SD mean?" with the literal text "[1]" when you ask
+# for citations. The citations come from verify(), not from the model.
+PROMPT = (
+    "Answer the question using only the context below. If the context does not "
+    "contain the answer, reply exactly: I don't know.\n\n{context}\n\n"
+    "Question: {question}\nAnswer:"
+)</code></pre>
+
+<p>The context blocks are still numbered and tagged with their filename, because that's cheap and it helps the model stay inside them. The numbers just aren't load-bearing any more. A local flan-t5-small writes the answers here; <code>--hosted</code> swaps in a hosted model behind the same <code>generate</code> function, and not one line of the gates changes.</p>
+
+<h2>Gate 2: every sentence has to match a chunk</h2>
+
+<p>This is the interesting one. Split the answer into sentences, and for each sentence find the retrieved chunk that best supports it. If nothing supports it, the sentence is dropped. If nothing survives, the whole answer becomes "I don't know".</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python">def support(pair, pair_vec, chunk_text, chunk_vec):
+    """Half embedding similarity, half word overlap. Either alone is easy to fool."""
+    pair_words = words(pair)
+    overlap = len(pair_words &amp; words(chunk_text)) / max(len(pair_words), 1)
+    return 0.5 * float(pair_vec @ chunk_vec) + 0.5 * overlap</code></pre>
+
+<p>Two halves, because each one alone is trivially fooled. Pure embedding similarity says "3 minutes" and "20 minutes" are nearly the same sentence, which is precisely the difference you need to catch. Pure word overlap passes anything the model copied, including a phrase copied out of a paragraph about something else - and I watched it wave through a bare <code>No</code>, because the word "no" appears in the chunk.</p>
+
+<p>The other decision in there took me two attempts. I first scored the <i>sentence</i> against the chunk. Asked how long the battery lasts, the model answered "3 minutes" - the firmware flash time - and the gate happily approved it, because the chunk about flashing firmware really does say "3 minutes". Grounded, cited, and wrong.</p>
+
+<p>The fix is to score the question and the sentence together as one string. A chunk that supports "3 minutes" is not the same thing as a chunk that supports "how long does the battery pack last? 3 minutes". That one change flipped three of the eval cases.</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python">    for claim, vec in zip(claims, vecs):
+        if len(words(claim)) &lt; 2:
+            rejected.append(f"{claim!r} - too short to check against a source")
+            continue
+        scored = [
+            (support(f"{question} {claim}", vec, index["chunks"][cid], index["vectors"][cid]), rank, cid)
+            for rank, (cid, _) in enumerate(hits, start=1)
+        ]
+        score, rank, cid = max(scored, key=lambda s: (s[0], -s[1]))  # ties go to the better hit
+        if score &lt; SUPPORT_MIN:
+            rejected.append(f"{claim!r} - no chunk supports it (best {score:.2f})")</code></pre>
+
+<p>The <code>rank</code> that comes out of that <code>max</code> is the citation. It's the chunk that supports the sentence, which is not always the chunk retrieval ranked first - in the run below, the E_SD answer cites <code>[2]</code>, not <code>[1]</code>.</p>
+
+<h2>Gate 3: numbers have to be in the source</h2>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-python">        elif not numbers(claim) &lt;= numbers(index["chunks"][cid]):
+            missing = ", ".join(sorted(numbers(claim) - numbers(index["chunks"][cid])))
+            rejected.append(f"{claim!r} - number {missing} is not in [{rank}]")</code></pre>
+
+<p>Three lines, and a set comparison does the work: every number in the sentence must appear in the chunk that backs it. Numbers are where hallucination hurts most - a voltage, a port, a dose - and they're also the easiest thing in the world to check exactly. There's no reason to ask a neural network whether 3.4 equals 3.4.</p>
+
+<p>It earns its place in the demo. Asked how far the unit can be from the base station, the model answers "3 m" - a number that appears in this manual only as "at least 3 m from any wall", in the mounting instructions. The real answer, 400 m, is in the error reference. The number gate throws it out.</p>
+
+<h2>Running it</h2>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-text">$ python main.py
+Indexed 12 chunks
+
+Q: What does error E_SD mean?
+A: no card is present, the card is larger than 128 GB, or it is not formatted FAT32 [2]
+   [1] overview.md #1 (retrieval 0.38)
+   [2] errors.md #1 (retrieval 0.38)
+   [3] errors.md #0 (retrieval 0.35)
+
+Q: How far from the base station can the unit be?
+A: I don't know. Nothing in the manual backs an answer.
+   dropped: '3 m' - number 3 is not in [1]
+
+Q: How long does the battery pack last?
+A: I don't know. Nothing in the manual backs an answer.
+   dropped: '3 minutes' - no chunk supports it (best 0.33)
+
+Q: Can I update the firmware over the radio link?
+A: I don't know. Nothing in the manual backs an answer.
+   dropped: 'No' - too short to check against a source
+
+Q: What is the capital of France?
+A: I don't know. The manual does not cover this.
+   dropped: retrieval gate: best chunk scored 0.10 &lt; 0.25</code></pre>
+
+<p>Every refusal names the gate that fired and what it threw away. That log line is the whole reason to build this yourself rather than pull in a framework: when a user complains the bot won't answer, you can see which threshold to argue with.</p>
+
+<h2>Do the gates actually help?</h2>
+
+<p><code>python main.py --eval</code> runs 11 questions - six the manual answers, five it doesn't - twice, with the gates off and on. A question is scored correct if an answerable one comes back containing the right value, or an unanswerable one comes back as a refusal.</p>
+
+<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow-x:auto;font-size:14px"><code class="language-text">Gates off: 4/6 answered correctly, 1/5 correctly refused, 5/11 overall
+Gates on : 3/6 answered correctly, 5/5 correctly refused, 8/11 overall</code></pre>
+
+<p>Read the middle number first. Without the gates, the model refused one of the five questions the manual can't answer. It made up the other four - the warranty is "20 minutes", the battery lasts "3 minutes", the maximum wind speed is "90 seconds". With the gates, all five come back as "I don't know".</p>
+
+<p>And there's the cost, in the first number on each line: one correct answer lost. Asked how many years of readings fit on the card, the model said "11", which is right, and the gate dropped it for being too short to check. One content word is not enough to distinguish a quote from a coincidence, so it goes. I'd take that trade for anything user-facing, but it is a trade, and you should measure it on your own corpus rather than take my word for the thresholds.</p>
+
+<h2>Gotchas</h2>
+
+<p><b>My tokeniser ate the full stops.</b> I wrote <code>re.findall(r"[a-z0-9_.]+", text.lower())</code> to keep <code>quill.cfg</code> and <code>3.4</code> in one piece. It also keeps <code>minutes.</code> in one piece, so a sentence ending in "15 minutes." never matched the chunk containing "15 minutes" - word overlap collapsed to zero and correct answers got rejected. The fix is one regex: <code>[a-z0-9_]+(?:\.[a-z0-9_]+)*</code>, which globs internal dots and refuses trailing ones.</p>
+
+<p><b>An answer of "[1]" crashes the verifier.</b> I strip the model's citation markers before splitting into sentences, which for that reply leaves an empty list, which hands an empty batch to the tokeniser: <code>IndexError: list index out of range</code>, from inside transformers. Anything that can legitimately produce zero claims needs its own branch, not a loop that happens to run zero times.</p>
+
+<p><b>Supported is not the same as correct.</b> The one eval case the gates can't save: asked how often the unit takes a reading, the model answers "every 15 minutes", which is the radio uplink interval, not the 90-second sampling interval. The sentence is in the retrieved text, the number is in the chunk, so it passes with a citation attached. These gates check grounding, not relevance. Anyone who tells you a similarity score gives you truth is selling something.</p>
+
+<p><b>Paragraph chunks beat a sliding window here.</b> I started with the usual 600-character window with 100 characters of overlap and got 9 chunks that each straddled two topics; the E_SD question retrieved the paragraph about LED colours. Splitting on blank lines and gluing short paragraphs up to 400 characters gave 12 tidy chunks, and that one change fixed the retrieval for two questions. Markdown already tells you where the boundaries are.</p>
+
+<h2>Where to go next</h2>
+
+<p><b>Swap the support score for an entailment model.</b> A small NLI checkpoint scores "does this chunk entail this sentence" properly, instead of approximating it with cosine plus word overlap. It's slower and about the same amount of code, and it would fix the "every 15 minutes" case that my heuristic can't.</p>
+
+<p><b>Show the dropped sentences instead of deleting them.</b> Right now unsupported text vanishes. In a real interface I'd render it greyed out with the reason attached - users trust a system that shows its working more than one that silently says less.</p>
+
+<p><b>Tune the two thresholds on your own eval set.</b> <code>RETRIEVAL_MIN = 0.25</code> and <code>SUPPORT_MIN = 0.42</code> are numbers I fitted to one fictional manual with <code>--eval</code>. Twenty of your own questions, half of them unanswerable, will tell you more in ten minutes than any default I could ship.</p>
+
+<p><b>Full code:</b> <a href="{{CODE_URL}}">browse on GitHub</a> | <a href="{{ZIP_URL}}">download ZIP</a></p>
+
+<p>The knob I'm least sure about is the two-content-word minimum. It's what costs me the correct "11", and I can imagine a better rule that asks whether the short answer appears verbatim in the chunk instead. How do you handle one-word answers in a system that has to verify them?</p>

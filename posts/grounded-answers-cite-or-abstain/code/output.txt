@@ -1,0 +1,65 @@
+$ python main.py
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|##########| 103/103 [00:00<00:00, 1401.08it/s]
+Indexed 12 chunks
+
+Loading weights:   0%|          | 0/190 [00:00<?, ?it/s]Loading weights:  18%|#7        | 34/190 [00:00<00:00, 331.88it/s]Loading weights:  36%|###5      | 68/190 [00:00<00:00, 149.22it/s]Loading weights: 100%|##########| 190/190 [00:00<00:00, 449.78it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+Q: What does error E_SD mean?
+A: no card is present, the card is larger than 128 GB, or it is not formatted FAT32 [2]
+   [1] overview.md #1 (retrieval 0.38)
+   [2] errors.md #1 (retrieval 0.38)
+   [3] errors.md #0 (retrieval 0.35)
+
+Q: How far from the base station can the unit be?
+A: I don't know. Nothing in the manual backs an answer.
+   dropped: '3 m' - number 3 is not in [1]
+
+Q: How long does the battery pack last?
+A: I don't know. Nothing in the manual backs an answer.
+   dropped: '3 minutes' - no chunk supports it (best 0.33)
+
+Q: Can I update the firmware over the radio link?
+A: I don't know. Nothing in the manual backs an answer.
+   dropped: 'No' - too short to check against a source
+
+Q: What is the capital of France?
+A: I don't know. The manual does not cover this.
+   dropped: retrieval gate: best chunk scored 0.10 < 0.25
+
+
+$ python main.py --eval
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|##########| 103/103 [00:00<00:00, 3004.85it/s]
+Indexed 12 chunks
+
+Loading weights:   0%|          | 0/190 [00:00<?, ?it/s]Loading weights:  21%|##1       | 40/190 [00:00<00:00, 398.84it/s]Loading weights:  42%|####2     | 80/190 [00:00<00:00, 265.73it/s]Loading weights: 100%|##########| 190/190 [00:00<00:00, 658.70it/s]
+[transformers] The tied weights mapping and config for this model specifies to tie shared.weight to lm_head.weight, but both are present in the checkpoints with different values, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning.
+Gates off (raw model output):
+  FAIL answer: every 15 minutes
+  ok   answer: no card is present, the card is larger than 128 GB, or it is not forma
+  ok   answer: 2.0 m above ground level
+  ok   answer: 3 minutes
+  FAIL answer: 3 m
+  ok   answer: 11
+  FAIL abstain: 3 minutes
+  FAIL abstain: No
+  FAIL abstain: 90 seconds
+  FAIL abstain: 20 minutes
+  ok   abstain: I don't know. The manual does not cover this.
+
+Gates on:
+  FAIL answer: every 15 minutes [3]
+  ok   answer: no card is present, the card is larger than 128 GB, or it is not forma
+  ok   answer: 2.0 m above ground level [1]
+  ok   answer: 3 minutes [1]
+  FAIL answer: I don't know. Nothing in the manual backs an answer.
+  FAIL answer: I don't know. Nothing in the manual backs an answer.
+  ok   abstain: I don't know. Nothing in the manual backs an answer.
+  ok   abstain: I don't know. Nothing in the manual backs an answer.
+  ok   abstain: I don't know. Nothing in the manual backs an answer.
+  ok   abstain: I don't know. Nothing in the manual backs an answer.
+  ok   abstain: I don't know. The manual does not cover this.
+
+Gates off: 4/6 answered correctly, 1/5 correctly refused, 5/11 overall
+Gates on : 3/6 answered correctly, 5/5 correctly refused, 8/11 overall
